@@ -1,0 +1,207 @@
+---
+title: "Measuring Coral Outplant Success in Kāneʻohe Bay"
+author: "Hanalei Hoʻopai-Sylva"
+format: revealjs
+transition: zoom
+transition-speed: fast
+editor: visual
+---
+
+```{r}
+#| message: false
+library(tidyverse)
+library(here)
+```
+
+## Restore with Resilience
+
+State wide initiative by CRL (HIMB) to find potential tradeoffs in thermal tolerance of corals
+
+Focus on coral restoration with thermally tolerant corals
+
+Four sites so far
+
+```         
+-   Honolulu
+
+-   Kāneʻohe Bay
+
+-   Maunalua Bay
+
+-   Olowalu, Maui
+```
+
+![](images/rwrboat.jpg){.absolute top="300" left="600" width="600"}
+
+## Kāneʻohe Bay
+
+100+ Corals of Opportunity collected
+
+Biopsies taken for thermal stress test
+
+3000+ frags outplanted throughout Bay
+
+![](images/Picture1-01.png){.absolute top="300" right="550" width="450"}
+
+![](images/outplant.jpg){.absolute top="300" left="550" width="450"}
+
+## Monitoring Fragments
+
+We used SfM Photogrammetry to collect growth and survival metrics of coral frags
+
+30 frags at 4 outplanting sites (plots) were selected as a subset
+
+::: {style="font-size: 70%;"}
+-   Measuring 3,000 frags would be too damn much
+:::
+
+![](images/KaneoheBay_outplant_growth_example%20(1).png) {.absolute top="100" width="380"}
+
+## Cleaning Data
+
+Needed to combine data of 4 plots into 1 large dataset
+
+-   20 csv files to read in
+
+```{r}
+#| echo: true
+#| eval: false
+#| code-line-numbers: "|1|3-5|7|9-12"
+
+csv_files <- list.files(here("attachments"), pattern = "\\.csv$", full.names = TRUE)
+
+plot_names <- unique(gsub("_T\\d+_data_measurements\\.csv$", "", basename(csv_files))) 
+# find unique plot names from names in ʻcsv_filesʻ list
+# example name "plot_01_T2_data_measurements.csv
+
+plot_datasets <- list() #create empty list
+
+for (plot in plot_names) {
+  plot_files <- grep(plot, csv_files, value = TRUE) #find file names within ʻcsv_filesʻ that have plot names 
+  plot_data <- lapply(plot_files, function(file) { #apply function to loop
+
+
+```
+
+## Cleaning Data
+
+```{r}
+#| echo: true
+#| eval: false
+
+    df <- read.csv(file) #make df
+    timepoint <- gsub("^.*_T(\\d+)_.*$", "\\1", basename(file)) #find ʻT#ʻ from long file name
+    df$Timepoint <- timepoint #make a ʻTimepointʻ column from timepoint name
+    df[] <- lapply(df, function(x) { 
+      if (is.factor(x)) {
+        return(as.character(x)) #convert factors to characters
+      } else if (is.integer(x)) {
+        return(as.character(x)) #convert integers to characters
+      }
+      return(x)
+    })
+    
+    return(df)
+  })
+  plot_combined <- bind_rows(plot_data) #combine datasets
+  plot_datasets[[plot]] <- plot_combined #split them up if I need to
+}
+```
+
+## Survival
+
+```{r}
+#| echo: true
+#| eval: false
+#| code-line-numbers: "|1-10|12-16"
+
+kaplan_data <- frag_surv %>%
+  group_by(Model) %>%
+  mutate(
+    # determine last observed timepoint for each coral
+    time = max(Timepoint[status == "alive"], na.rm = TRUE),
+    # mark "event" (1=dead, 0=alive)
+    event = if_else(any(status == "dead"), 1, 0)
+  ) %>%
+  ungroup() %>%
+  select(Model, time, event)
+
+kaplan_data <- kaplan_data %>% #add species info to the mix
+  left_join(outplant_info %>% rename(Model = outplant_ID) %>%
+              mutate(Model = as.character(Model)) %>% 
+              select(Model, genus_species), by = "Model") %>%
+  distinct(Model, .keep_all = TRUE) #remove duplicate rows from ʻModelʻ
+
+```
+
+## Survival
+
+![Kaplan-Meier Survival curve of two outplanted coral species. Line is meant to represent probability of surviving over time when data is missing in between timepoints.](figures/KM_surv.png)
+
+## Linear Growth
+
+```{r}
+#| echo: true
+#| eval: false
+#| code-line-numbers: "|1-4|6-14"
+
+corals <- outplant_info%>%
+  select(plot,outplant_ID,genus_species)%>%
+  rename(Model=outplant_ID)%>%
+  mutate(Model = as.character(Model))
+
+fragments <- combined_data %>%
+  group_by(Model) %>%
+  filter(n() >= 4) %>% #take data points that occur 4 or more times
+  ungroup()%>%
+  mutate(Timepoint = as.numeric(Timepoint))%>% #change to a num
+  mutate(Surface.Area..cm.2. = pmin(Surface.Area..cm.2., 750), #find a min threshold to get rid of outliers
+         Height.range..cm. = pmin(Height.range..cm., 20),
+         Volume..cm.3. = pmin(Volume..cm.3., 205))
+  
+  coral_fragments <- fragments%>%
+    left_join(., corals)
+```
+
+## Linear Growth
+
+![](figures/SA.png)
+
+## Linear Growth
+
+![](figures/HR.png){.absolute width="640"}
+
+![](images/coral1.jpg){.absolute top="250" left="750" width="325"}
+
+## Linear Growth
+
+![](figures/Vol.png){.absolute width="640"}
+
+![](images/coral3.jpg){.absolute top="150" left="750" width="225"}
+
+## Relative Size
+
+```{r}
+#| echo: true
+#| eval: false
+
+relative_size <- coral_fragments %>%
+  group_by(Model, plot) %>%
+  arrange(Timepoint) %>%
+  summarise(
+    first_size = first(Surface.Area..cm.2.),  # size at the first timepoint
+    last_size = last(Surface.Area..cm.2.),   # size at the last timepoint
+    .groups = 'drop'  # drop grouping after summarizing
+  ) %>%
+  mutate(
+    relative_growth = (last_size - first_size) / first_size,
+    plot = factor(plot))
+```
+
+## Relative Size
+
+![Relative size of coral outplants by plot.](figures/rel_size.png)
+
+## Mahaloz for listening! 🤙🏽
+
+![](images/kbay1-01.png){.absolute top="220" width="1300"}

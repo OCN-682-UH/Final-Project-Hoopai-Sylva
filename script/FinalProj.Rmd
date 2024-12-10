@@ -1,0 +1,253 @@
+---
+title: "Final Proj"
+author: "Hanalei"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      message=FALSE,
+                      warning=FALSE)
+```
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(here)
+library(readxl)
+library(RColorBrewer)
+library(ggsurvfit)
+library(survival)
+library(survminer)
+```
+
+## Reading / Looping in data
+```{r}
+csv_files <- list.files(here("data","attachments"), pattern = "\\.csv$", full.names = TRUE)
+
+plot_names <- unique(gsub("_T\\d+_data_measurements\\.csv$", "", basename(csv_files))) 
+# example name "plot_01_T2_data_measurements.csv
+
+plot_datasets <- list()
+
+for (plot in plot_names) {
+  plot_files <- grep(plot, csv_files, value = TRUE) #find file names within ʻcsv_filesʻ that have plot names 
+  plot_data <- lapply(plot_files, function(file) { #apply function to loop
+    
+    df <- read.csv(file)
+    timepoint <- gsub("^.*_T(\\d+)_.*$", "\\1", basename(file)) #find ʻT#ʻ from long file name
+    df$Timepoint <- timepoint #make a ʻTimepointʻ column from timepoint name
+    df[] <- lapply(df, function(x) { 
+      if (is.factor(x)) {
+        return(as.character(x))
+      } else if (is.integer(x)) {
+        return(as.character(x))
+      }
+      return(x)
+    })
+    
+    return(df)
+  })
+  plot_combined <- bind_rows(plot_data) #combine datasets
+  plot_datasets[[plot]] <- plot_combined #split them up if I need to
+}
+
+
+```
+
+## MAKING PLOTS / CLEANING
+```{r}
+plot_01 <- plot_datasets[["plot_01"]]
+plot_02 <- plot_datasets[["plot_02"]]
+plot_03 <- plot_datasets[["plot_03"]]
+plot_04 <- plot_datasets[["plot_04"]]
+
+
+
+plot_01 <- plot_01%>%
+  select(Model, Surface.Area..cm.2., Height.range..cm., Volume..cm.3.,Timepoint)%>%
+  filter(grepl("_closed", Model))%>% #only want corals with ʻ_closedʻ from Model column
+  mutate(Model = sub("_closed$", "", Model), plot=1) #get rid of _closed so just number avail
+
+plot_02 <- plot_02%>%
+  select(Model, Surface.Area..cm.2., Height.range..cm., Volume..cm.3.,Timepoint)%>%
+  filter(grepl("_closed", Model))%>%
+  mutate(Model = sub("_closed$", "", Model), plot=2)
+
+plot_03 <- plot_03%>%
+  select(Model, Surface.Area..cm.2., Height.range..cm., Volume..cm.3.,Timepoint)%>%
+  filter(grepl("_closed", Model))%>%
+  mutate(Model = sub("_closed$", "", Model), plot=3)
+
+plot_04 <- plot_04%>%
+  select(Model, Surface.Area..cm.2., Height.range..cm., Volume..cm.3.,Timepoint)%>%
+  filter(grepl("_closed", Model))%>%
+  mutate(Model = sub("_closed$", "", Model), plot=4)
+
+combined_data <- bind_rows(plot_01, plot_02, plot_03, plot_04) #combine 4 plot datasets together since earlier attempt was funky ^^
+
+```
+
+## Pulling size metrics
+```{r}
+file_path <- here("data","Kaneohe_Bay_metadata.xlsx")
+
+outplant_info <- read_excel(file_path, sheet = "Outplants")
+
+corals <- outplant_info%>%
+  select(plot,outplant_ID,genus_species)%>%
+  rename(Model=outplant_ID)%>%
+  mutate(Model = as.character(Model))
+
+fragments <- combined_data %>%
+  group_by(Model) %>%
+  filter(n() >= 4) %>% #take data points that occur 4 or more times
+  ungroup()%>%
+  mutate(Timepoint = as.numeric(Timepoint))%>% #change to a num
+  mutate(Surface.Area..cm.2. = pmin(Surface.Area..cm.2., 750), #find a min thershold to get rid of outliers
+         Height.range..cm. = pmin(Height.range..cm., 20),
+         Volume..cm.3. = pmin(Volume..cm.3., 205))
+  
+  coral_fragments <- fragments%>%
+    left_join(., corals)%>%
+    filter(!is.na(genus_species)) #filter out NAs from ʻgenus_speciesʻ
+```
+
+## Kaplan-Meier survival
+```{r}
+combined_data$Timepoint <- as.integer(combined_data$Timepoint)  # convert Timepoint to integer
+all_models <- unique(combined_data$Model)  # make list of unique corals
+all_timepoints <- expand.grid(Model = all_models, Timepoint = 2:7)  # timepoints T2 to T7 for each coral
+all_timepoints$Timepoint <- as.integer(all_timepoints$Timepoint)  # convert Timepoint to integer
+
+
+combined_full <- left_join(all_timepoints, combined_data %>%
+                             select(Model, Timepoint, Surface.Area..cm.2.), by = c("Model", "Timepoint"))
+#combine datasets
+
+frag_surv <- combined_full %>%
+  left_join(combined_data %>%
+              mutate(status = "alive") %>%
+              select(Model, Timepoint, status), by = c("Model", "Timepoint")) %>% #only work with these columns
+  #combine new dataset
+  mutate(status = if_else(is.na(status), "dead", status)) %>%
+  
+  arrange(Model, Timepoint) %>% #arrange by coral and timepoint in order
+  group_by(Model) %>%
+  mutate(status = if_else(Timepoint > max(Timepoint[!is.na(Surface.Area..cm.2.)]), "dead", status)) %>% #mark corals as ʻdeadʻ in status if done showing up in timepoint
+  ungroup()
+
+kaplan_data <- frag_surv %>%
+  group_by(Model) %>%
+  mutate(
+    # determine last observed timepoint for each coral
+    time = max(Timepoint[status == "alive"], na.rm = TRUE),
+    # mark ʻeventʻ (1=dead, 0=alive)
+    event = if_else(any(status == "dead"), 1, 0)
+  ) %>%
+  ungroup() %>%
+  select(Model, time, event)
+
+kaplan_data <- kaplan_data %>% #add species info to the mix
+  left_join(outplant_info %>% rename(Model = outplant_ID) %>%
+              mutate(Model = as.character(Model)) %>% 
+              select(Model, genus_species), by = "Model") %>%
+  distinct(Model, .keep_all = TRUE) #remove duplicate rows from ʻModelʻ
+
+kaplan_data$genus_species <- as.factor(kaplan_data$genus_species)
+
+km_fit <- survfit(Surv(time, event) ~ genus_species, data = kaplan_data) #create km model for ggsurvplot to run
+
+ggsurvplot(km_fit, 
+           title = "Kaplan-Meier Survival Curve for Coral Fragments by Genus Species", 
+           xlab = "Timepoint", 
+           ylab = "Survival Probability", 
+           palette = c("#A19575D8", "#95D6AB"),  
+           conf.int = TRUE, # confidence interval
+           legend.title = "",
+           legend.labs = c("Montipora capitata", "Porites compressa")) 
+ggsave(here("output", "figures", "KM_surv.png"))
+```
+
+## Relative size 
+```{r}
+relative_size <- coral_fragments %>%
+  group_by(Model, plot) %>%
+  arrange(Timepoint) %>% #put timepoints in order
+  summarise(
+    first_size = first(Surface.Area..cm.2.),  # size at first timepoint
+    last_size = last(Surface.Area..cm.2.),   # size at last timepoint
+    .groups = 'drop'  # drop grouping after summarizing
+  ) %>%
+  mutate(
+    relative_growth = (last_size - first_size) / first_size,
+    plot = factor(plot))
+
+```
+
+### #Fig - rel size
+```{r}
+relative_size%>%
+  ggplot()+
+  geom_boxplot(aes(plot,relative_growth, fill = plot),outlier.color = NA)+
+  geom_jitter(aes(plot,relative_growth, fill = plot),width=.08,height=0,alpha=.35,size=.5)+
+  labs(x = "Plot", y = "Relative Size")+
+  scale_fill_brewer(palette = "YlGnBu") + #color palette from Rcolor package
+  theme_minimal()+
+  theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank(),
+         legend.position = "none")
+ggsave(here("output", "figures", "rel_size.png"))
+
+```
+
+### Figs - surface area, height range, volume
+```{r}
+coral_fragments %>%
+  ggplot(aes(x = Timepoint, y = Surface.Area..cm.2., color = genus_species, group = genus_species)) +
+  geom_point(alpha = 0.5, size = 1) +  
+  geom_smooth(method = "lm", size = 1) +  # smooth trend line
+  labs(x = "Timepoint", y = "Surface Area (cm²)") +
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.title = element_blank(), 
+    legend.position = "bottom")+
+  scale_color_manual(values=c("#A19575D8","#95D6AB"),labels=c("Montipora capitata","Porites compressa"))
+ggsave(here("output", "figures", "SA.png"))
+
+#HR
+coral_fragments %>%
+  ggplot(aes(x = Timepoint, y = Height.range..cm., color = genus_species, group = genus_species)) +
+  geom_point(alpha = 0.5, size = 1) +  
+  geom_smooth(method = "lm", size = 1) +  
+  labs(x = "Timepoint", y = "Height Range (cm)") +
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.title = element_blank(),  
+    legend.position = "bottom"
+  )+
+  scale_color_manual(values=c("#A19575D8","#95D6AB"),labels=c("Montipora capitata","Porites compressa"))
+ggsave(here("output", "figures", "HR.png"))
+  
+
+#VL
+coral_fragments %>%
+  ggplot(aes(x = Timepoint, y = Volume..cm.3., color = genus_species, group = genus_species)) +
+  geom_point(alpha = 0.5, size = 1) +  
+  geom_smooth(method = "lm", size = 1) +  
+  labs(x = "Timepoint", y = "Volume (cm³)") +
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.title = element_blank(),  
+    legend.position = "bottom"
+  )+
+  scale_color_manual(values=c("#A19575D8","#95D6AB"),labels=c("Montipora capitata","Porites compressa"))
+ggsave(here("output", "figures", "Vol.png"))
+```
+
